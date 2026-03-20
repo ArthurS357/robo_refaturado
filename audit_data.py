@@ -442,13 +442,18 @@ class DataProcessor:
         """
         Cruza a base CMDB com os campos mandatorios do Master.
         Exporta Excel com 3 abas:
-          1. visao_datamaster_brasil  — campos mandatorios encontrados no CMDB
-                                       com contagem de nulos e percentual
+          1. visao_datamaster_brasil  — TODOS os campos mandatórios do Master,
+                                       incluindo os sem correspondência no CMDB
+                                       (nulos/ausentes aparecem com células vazias)
           2. completude_brasil        — resumo de cobertura por classe
           3. atributo_sem_mandatorio  — classes no CMDB sem referencia no Master
 
         Logica fiel ao Alex_visao_base_CMDB_V4.PY.
         Leitura correta do Master: aba 'Attributes', iloc[:,4:26], Mandatory=='Mandatory'.
+
+        ALTERAÇÃO: df_master_filtrado agora inclui registros left_only (campos
+        mandatórios do Master que NÃO encontraram correspondência no CMDB),
+        exibindo-os com nulos/percentual_nulos em branco para identificação.
         """
         try:
             # 1. Master
@@ -553,9 +558,14 @@ class DataProcessor:
                 indicator=True,
             )
 
-            df_master_filtrado = df_master_merged[
-                df_master_merged["_merge"] != "left_only"
-            ].copy()
+            # ─────────────────────────────────────────────────────────────────
+            # ALTERAÇÃO: inclui TODOS os registros do Master no relatório,
+            # inclusive os "left_only" (campos mandatórios sem dados no CMDB).
+            # Antes: filtrava fora os left_only — agora eles aparecem com
+            # nulos/total/percentual_nulos em branco, permitindo identificar
+            # campos obrigatórios completamente ausentes na base CMDB.
+            # ─────────────────────────────────────────────────────────────────
+            df_master_filtrado = df_master_merged.copy()
 
             colunas_saida = [
                 c
@@ -587,7 +597,7 @@ class DataProcessor:
                 if c in df_master_filtrado.columns
             ]
             df_master_filtrado = df_master_filtrado[colunas_saida]
-            print(f"   Registros cruzados: {len(df_master_filtrado):,}")
+            print(f"   Registros na visao (com nulos): {len(df_master_filtrado):,}")
 
             # 9. Analise de completude por classe
             analise_completude_global = (
@@ -638,9 +648,13 @@ class DataProcessor:
                     writer, sheet_name="atributo_sem_mandatorio", index=False
                 )
 
+            # Métricas do resumo — conta apenas os que têm dados no CMDB
+            df_com_dados = df_master_filtrado[
+                df_master_filtrado["_merge"] != "left_only"
+            ]
             media_nulos = (
-                df_master_filtrado["percentual_nulos"].mean()
-                if "percentual_nulos" in df_master_filtrado.columns
+                df_com_dados["percentual_nulos"].mean()
+                if "percentual_nulos" in df_com_dados.columns
                 else 0
             )
             classes_brasil = (
@@ -648,11 +662,14 @@ class DataProcessor:
                 if "Class" in analise_completude_brasil.columns
                 else 0
             )
+            sem_dados_cmdb = int((df_master_filtrado["_merge"] == "left_only").sum())
             return True, (
                 f"Relatorio gerado com sucesso!\n\n"
-                f"Registros na visao Brasil:   {len(df_master_filtrado):,}\n"
-                f"Classes com mandatorios:     {classes_brasil}\n"
-                f"Media de % nulos:            {media_nulos:.1f}%\n\n"
+                f"Total de campos mandatórios:      {len(df_master_filtrado):,}\n"
+                f"  ✅ Com dados no CMDB:           {len(df_com_dados):,}\n"
+                f"  ❌ Ausentes no CMDB (nulos):    {sem_dados_cmdb:,}\n"
+                f"Classes com mandatorios:           {classes_brasil}\n"
+                f"Media de % nulos (campos c/ dados): {media_nulos:.1f}%\n\n"
                 f"Arquivo salvo em:\n{caminho_saida}"
             )
 
