@@ -30,17 +30,12 @@ class DataProcessor:
         try:
             limite_data = None
             if dias_filtro and isinstance(dias_filtro, int):
-                # Data de corte para performance
                 from datetime import timedelta
 
                 limite_data = datetime.now() - timedelta(days=dias_filtro)
 
-            # Varredura recursiva (os.walk)
             for root, dirs, files in os.walk(root_path):
                 pasta_atual = os.path.basename(root)
-
-                # --- LÓGICA DE AGRUPAMENTO ---
-                # Verifica se a pasta atual é um mês (formato MM.YYYY)
                 is_mes = re.match(r"^\d{2}\.\d{4}$", pasta_atual)
 
                 for file in files:
@@ -50,26 +45,19 @@ class DataProcessor:
                             stats = os.stat(full_path)
                             dt_mod = datetime.fromtimestamp(stats.st_mtime)
 
-                            # Filtro de dias
                             if limite_data and dt_mod < limite_data:
                                 continue
 
                             tag = "old" if (datetime.now() - dt_mod).days > 7 else "new"
-
-                            # Nome do Relatório (Pasta acima do mês)
                             nome_relatorio = os.path.basename(os.path.dirname(root))
 
-                            # DEFINIÇÃO DO GRUPO PARA A UI:
                             if is_mes:
-                                # Se estiver dentro de uma pasta de mês, agrupa pelo MÊS (ex: "01.2024")
                                 grupo_visual = pasta_atual
                                 nome_visual = file
                             else:
-                                # Se não estiver em pasta de mês, usa o caminho relativo para organizar
                                 grupo_visual = f"Outros > {pasta_atual}"
                                 nome_visual = file
 
-                            # Contagem de linhas (opcional, removível se causar lentidão em rede lenta)
                             qtd_linhas = self.contar_linhas(full_path)
 
                             dados.append(
@@ -91,7 +79,6 @@ class DataProcessor:
         except Exception as e:
             print(f"Erro scan histórico: {e}")
 
-        # Ordena: Primeiro por Grupo (Mês), depois por Data do arquivo (mais recente primeiro)
         dados.sort(
             key=lambda x: (
                 x["pasta_pai"],
@@ -111,22 +98,20 @@ class DataProcessor:
         pastas_encontradas = []
         print(f"Buscando pastas '{mes_ano_alvo}' em toda a árvore...")
 
-        # 1. Busca Profunda
         for root, dirs, files in os.walk(root_path):
             nome_pasta = os.path.basename(root)
 
-            # Se a pasta atual é o mês alvo
             if nome_pasta == mes_ano_alvo:
                 pastas_encontradas.append(root)
                 for f in files:
                     if f.lower().endswith(".csv"):
                         nome_sem_ext = os.path.splitext(f)[0]
-                        # Remove sufixos de cópia
                         nome_limpo = re.sub(
                             r"_Copia_\d+", "", nome_sem_ext, flags=re.IGNORECASE
                         )
                         arquivos_na_pasta.add(nome_limpo.lower())
                         arquivos_na_pasta.add(nome_sem_ext.lower())
+
         caminho_display = (
             f"{len(pastas_encontradas)} pastas '{mes_ano_alvo}' encontradas."
         )
@@ -135,10 +120,9 @@ class DataProcessor:
                 lista_esperada_nomes,
                 "Nenhuma pasta com este mês encontrada na rede.",
             )
-        # 2. Verifica o que falta
+
         faltantes = []
         for nome in lista_esperada_nomes:
-            # Compara lowercase
             if nome.lower() not in arquivos_na_pasta:
                 faltantes.append(nome)
         return faltantes, caminho_display
@@ -151,7 +135,6 @@ class DataProcessor:
                 if f.lower().endswith(".csv"):
                     full = os.path.join(root, f)
                     try:
-                        # Tenta ler apenas 5 linhas com engines flexíveis
                         self._tenta_ler_csv(full, nrows=5)
                     except Exception as e:
                         bad_files.append((f, str(e)))
@@ -166,7 +149,7 @@ class DataProcessor:
         tentativas = [
             {"enc": "utf-8", "sep": ";"},
             {"enc": "latin-1", "sep": ";"},
-            {"enc": "utf-8-sig", "sep": ";"},  # Para Excel com BOM
+            {"enc": "utf-8-sig", "sep": ";"},
             {"enc": "utf-8", "sep": ","},
             {"enc": "latin-1", "sep": ","},
         ]
@@ -181,15 +164,14 @@ class DataProcessor:
                     sep=t["sep"],
                     nrows=nrows,
                     on_bad_lines="skip",
-                    engine="python",  # Mais lento mas mais permissivo
+                    engine="python",
                 )
-                if df.shape[1] > 1:  # Sucesso: conseguiu separar colunas
+                if df.shape[1] > 1:
                     return df
             except Exception as e:
                 last_exception = e
                 continue
 
-        # Se chegou aqui, nenhuma combinação funcionou bem
         if last_exception:
             raise last_exception
         raise ValueError("Formato CSV não reconhecido (falha na separação de colunas).")
@@ -201,19 +183,16 @@ class DataProcessor:
         Agrupa todos os arquivos de pastas com nome 'mes_alvo' num único Master.
         Modo Streaming: baixo consumo de RAM, seguro para milhões de linhas.
         """
-
         arquivos_para_unir = []
 
         print(f"Iniciando Gerador Master para mês: {mes_alvo}")
         print(f"Raiz da busca: {root_path}")
 
-        # 1. Coleta arquivos
         for root, dirs, files in os.walk(root_path):
             nome_pasta = os.path.basename(root)
 
             if nome_pasta == mes_alvo:
                 print(f"-> Coletando de: {root}")
-
                 for file in files:
                     if (
                         file.lower().endswith(".csv")
@@ -225,39 +204,34 @@ class DataProcessor:
 
         if not arquivos_para_unir:
             print(f"Aviso: Nenhuma pasta '{mes_alvo}' ou nenhum CSV encontrado.")
-            return
+            return None
 
         print(f"Total de arquivos para unir: {len(arquivos_para_unir)}")
 
-        # 2. Define output
         try:
             if not output_path:
                 nome_arquivo = f"MASTER_CONSOLIDADO_{mes_alvo.replace('.','_')}.csv"
                 output_path = os.path.join(root_path, nome_arquivo)
 
-            # remove arquivo antigo
             if os.path.exists(output_path):
                 os.remove(output_path)
 
             escreveu_algo = False
             total_linhas = 0
             total_arquivos_ok = 0
+            erros = []
 
-            # 3. Streaming write
             for arq in arquivos_para_unir:
                 try:
                     df = self._tenta_ler_csv(arq)
 
-                    # proteção contra vazio
                     if df is None or df.empty:
                         print(f"Arquivo vazio ignorado: {os.path.basename(arq)}")
                         continue
 
-                    # colunas de rastreio
                     df["Origem_Arquivo"] = os.path.basename(arq)
                     df["Origem_Relatorio"] = os.path.basename(os.path.dirname(arq))
 
-                    # grava streaming
                     df.to_csv(
                         output_path,
                         mode="a",
@@ -273,15 +247,15 @@ class DataProcessor:
                     print(f"OK: {os.path.basename(arq)} ({len(df)} linhas)")
 
                 except Exception as e:
-                    print(f"Erro ao ler arquivo {os.path.basename(arq)}: {e}")
+                    msg = f"Erro ao ler '{os.path.basename(arq)}': {e}"
+                    print(msg)
+                    erros.append(msg)
                     continue
 
-            # 4. Resultado final
             if escreveu_algo:
-                print("\nMASTER gerado com sucesso")
-                print(f"Arquivo: {output_path}")
-                print(f"Arquivos processados: {total_arquivos_ok}")
-                print(f"Total de linhas: {total_linhas:,}")
+                print(
+                    f"\nMASTER gerado: {output_path} | {total_arquivos_ok} arquivos | {total_linhas:,} linhas"
+                )
                 return output_path
             else:
                 print("Nenhum dado válido encontrado.")
@@ -292,51 +266,92 @@ class DataProcessor:
             return None
 
     def unificar_partes(self, pasta_alvo, output_path=None):
-        """Unifica arquivos divididos (_pt1, _pt2) na mesma pasta."""
+        """
+        Unifica arquivos divididos (_pt1, _pt2...) na mesma pasta.
+        Retorna dict com: sucesso (bool), msg (str), unificados (int), erros (list).
+        """
         if (
             not pasta_alvo
             or not os.path.exists(pasta_alvo)
             or not os.path.isdir(pasta_alvo)
         ):
-            print(
-                f"Aviso: Diretório inválido ou inacessível para unificação: {pasta_alvo}"
-            )
-            return
+            return {
+                "sucesso": False,
+                "msg": f"Diretório inválido ou inacessível: {pasta_alvo}",
+                "unificados": 0,
+                "erros": [],
+            }
 
-        try:
-            grupos = {}
-            for f in os.listdir(pasta_alvo):
-                if f.lower().endswith(".csv"):
-                    # Regex para identificar base do nome (remove _pt1, _pt02, etc)
-                    base_name = re.sub(r"_pt\d+", "", f, flags=re.IGNORECASE)
-                    grupos.setdefault(base_name, []).append(os.path.join(pasta_alvo, f))
+        # CORREÇÃO CRÍTICA: Apenas arquivos que CONTÊM _pt\d+ são agrupados.
+        # Anteriormente, arquivos sem o padrão eram incluídos indevidamente no grupo.
+        grupos = {}
+        for f in os.listdir(pasta_alvo):
+            if f.lower().endswith(".csv") and re.search(
+                r"_pt\d+", f, flags=re.IGNORECASE
+            ):
+                base_name = re.sub(r"_pt\d+", "", f, flags=re.IGNORECASE)
+                grupos.setdefault(base_name, []).append(os.path.join(pasta_alvo, f))
 
-            for base, arquivos in grupos.items():
-                if len(arquivos) > 1:
-                    dfs = []
-                    for arq in sorted(arquivos):
-                        try:
-                            dfs.append(self._tenta_ler_csv(arq))
-                        except Exception as e:
-                            print(f"Erro ao ler fragmento para unificação '{arq}': {e}")
+        if not grupos:
+            return {
+                "sucesso": True,
+                "msg": "Nenhum arquivo com partes (_pt1, _pt2...) foi encontrado na pasta selecionada.",
+                "unificados": 0,
+                "erros": [],
+            }
 
-                    if dfs:
-                        final = pd.concat(dfs, ignore_index=True)
-                        nome_final = f"UNIFICADO_{base}"
-                        # Garante extensão .csv
-                        if not nome_final.lower().endswith(".csv"):
-                            nome_final += ".csv"
+        unificados = 0
+        erros = []
 
-                        final.to_csv(
-                            os.path.join(pasta_alvo, nome_final),
-                            sep=";",
-                            index=False,
-                            encoding="utf-8-sig",
-                        )
-        except Exception as e:
-            print(f"Erro unificação: {e}")
+        for base, arquivos in grupos.items():
+            # Ignora grupos com apenas 1 arquivo (não precisa unificar)
+            if len(arquivos) < 2:
+                print(f"Ignorado (apenas 1 parte): {base}")
+                continue
 
-    # --- LÓGICA DO RELATÓRIO DE COMPLETUDE (INSERIDA) ---
+            dfs = []
+            for arq in sorted(arquivos):  # sort garante ordem correta: _pt1, _pt2...
+                try:
+                    dfs.append(self._tenta_ler_csv(arq))
+                except Exception as e:
+                    erros.append(f"Leitura de '{os.path.basename(arq)}': {e}")
+
+            if not dfs:
+                erros.append(f"Nenhuma parte legível para '{base}'")
+                continue
+
+            try:
+                df_final = pd.concat(dfs, ignore_index=True)
+
+                nome_final = f"UNIFICADO_{base}"
+                if not nome_final.lower().endswith(".csv"):
+                    nome_final += ".csv"
+
+                caminho_saida = os.path.join(pasta_alvo, nome_final)
+                df_final.to_csv(
+                    caminho_saida, sep=";", index=False, encoding="utf-8-sig"
+                )
+
+                unificados += 1
+                print(
+                    f"Unificado: {nome_final} ({len(df_final):,} linhas de {len(dfs)} partes)"
+                )
+
+            except Exception as e:
+                erros.append(f"Concat/escrita de '{base}': {e}")
+
+        linhas_msg = f"{unificados} grupo(s) unificado(s) com sucesso."
+        if erros:
+            linhas_msg += f" | {len(erros)} erro(s) encontrado(s)."
+
+        return {
+            "sucesso": True,
+            "msg": linhas_msg,
+            "unificados": unificados,
+            "erros": erros,
+        }
+
+    # --- LÓGICA DO RELATÓRIO DE COMPLETUDE ---
     def gerar_relatorio_completude(self, caminho_cmdb, caminho_master, caminho_saida):
         """Lógica avançada para cruzar a Base CMDB com as regras de completude do Master."""
         try:
@@ -364,7 +379,6 @@ class DataProcessor:
 
             df_master.columns = df_master.columns.astype(str).str.strip().str.lower()
 
-            # CLONAGEM DE MÚLTIPLAS COLUNAS NO MASTER
             mapa_clonagem = {
                 "company": ["company", "u_company"],
                 "business_criticality": [
@@ -613,7 +627,7 @@ class StructureValidator:
     def __init__(self):
         self.master_data = None
         self.master_path = None
-        self._data_processor = DataProcessor()  # Reutiliza leitor robusto
+        self._data_processor = DataProcessor()
 
     def carregar_master(self, caminho_master, force_reload=False):
         """Carrega o arquivo master de forma segura."""
@@ -640,7 +654,6 @@ class StructureValidator:
                         f"Aviso: Erro ao ler Excel ({e}). Tentando fallback para CSV..."
                     )
 
-            # Fallback estrito para CSV usando o leitor robusto
             df = self._data_processor._tenta_ler_csv(caminho_master)
             self.master_data = {"Base": df}
             return self.master_data
@@ -651,12 +664,233 @@ class StructureValidator:
                 f"Falha crítica ao carregar arquivo master '{caminho_master}': {str(e)}"
             )
 
+    def executar_validacao_completa(self, caminho_cmdb, caminho_master, caminho_saida):
+        """
+        Valida os campos mandatórios do Master contra as colunas da base CMDB.
+        Gera um relatório Excel com CHECK = TRUE (presente) / FALSE (ausente) por campo/classe.
+
+        Args:
+            caminho_cmdb:   Caminho do arquivo CSV/Excel da base CMDB.
+            caminho_master: Caminho do arquivo Excel com o modelo de dados (aba "Attributes").
+            caminho_saida:  Caminho onde o Excel de resultado será salvo.
+
+        Returns:
+            (True, mensagem_sucesso) ou (False, mensagem_erro)
+        """
+        try:
+            # ── 1. CARREGAR O MASTER ─────────────────────────────────────────────────
+            xls = pd.ExcelFile(caminho_master, engine="openpyxl")
+            aba_alvo = (
+                "Attributes" if "Attributes" in xls.sheet_names else xls.sheet_names[0]
+            )
+
+            # Detecta linha do cabeçalho real (comum no CMDB: cabeçalho deslocado)
+            df_raw = pd.read_excel(caminho_master, sheet_name=aba_alvo, header=None)
+            header_idx = 0
+            for idx in range(min(30, len(df_raw))):
+                row_vals = df_raw.iloc[idx].astype(str).str.lower().tolist()
+                tem_atributo = any(
+                    k in row_vals for k in ["variable", "atributo", "field", "coluna"]
+                )
+                tem_mandatorio = any(
+                    k in row_vals for k in ["mandatory", "obrigatorio", "mandatório"]
+                )
+                if tem_atributo and tem_mandatorio:
+                    header_idx = idx
+                    break
+
+            df_master = pd.read_excel(
+                caminho_master,
+                sheet_name=aba_alvo,
+                skiprows=header_idx,
+                engine="openpyxl",
+            )
+            df_master.columns = df_master.columns.astype(str).str.strip().str.lower()
+
+            # ── 2. IDENTIFICAR COLUNAS-CHAVE NO MASTER ──────────────────────────────
+            col_mandatoria = next(
+                (c for c in df_master.columns if "mandatory" in c or "obrigat" in c),
+                None,
+            )
+            col_atributo = next(
+                (
+                    c
+                    for c in df_master.columns
+                    if c
+                    in ["variable", "atributo", "field", "coluna", "name", "variável"]
+                ),
+                None,
+            )
+            col_classe = next(
+                (
+                    c
+                    for c in df_master.columns
+                    if c in ["class", "sys_class_name", "sys class name", "classe"]
+                ),
+                None,
+            )
+            col_descricao = next(
+                (
+                    c
+                    for c in df_master.columns
+                    if "descri" in c or "label" in c or "descript" in c
+                ),
+                None,
+            )
+
+            if not col_mandatoria:
+                return False, (
+                    "Coluna 'Mandatory' não encontrada no Master.\n"
+                    f"Colunas disponíveis: {list(df_master.columns)}"
+                )
+            if not col_atributo:
+                return False, (
+                    "Coluna de atributos ('Variable' / 'Field') não encontrada no Master.\n"
+                    f"Colunas disponíveis: {list(df_master.columns)}"
+                )
+
+            # ── 3. FILTRAR CAMPOS MANDATÓRIOS ───────────────────────────────────────
+            mask_mandatorio = (
+                df_master[col_mandatoria]
+                .astype(str)
+                .str.contains("Mandatory", case=False, na=False)
+            )
+            df_mandatorios = df_master[mask_mandatorio].copy()
+
+            if df_mandatorios.empty:
+                return False, (
+                    "Nenhum campo marcado como 'Mandatory' foi encontrado no Master.\n"
+                    f"Verifique a coluna '{col_mandatoria}'."
+                )
+
+            # ── 4. CARREGAR COLUNAS DO CMDB (somente cabeçalho — eficiente em RAM) ──
+            try:
+                df_cmdb_header = self._data_processor._tenta_ler_csv(
+                    caminho_cmdb, nrows=0
+                )
+            except Exception as e:
+                return False, f"Não foi possível ler o arquivo CMDB:\n{e}"
+
+            cols_cmdb_upper = set(
+                df_cmdb_header.columns.astype(str).str.strip().str.upper()
+            )
+
+            # ── 5. CRUZAMENTO: CADA CAMPO MANDATÓRIO vs CMDB ────────────────────────
+            resultados = []
+            campos_vistos = set()  # evita duplicatas
+
+            for _, row in df_mandatorios.iterrows():
+                atributo = str(row[col_atributo]).strip()
+                if not atributo or atributo.upper() in ("NAN", "NONE", ""):
+                    continue
+                if atributo.upper() in campos_vistos:
+                    continue
+                campos_vistos.add(atributo.upper())
+
+                classe = (
+                    str(row[col_classe]).strip()
+                    if col_classe and pd.notna(row.get(col_classe))
+                    else "N/A"
+                )
+                mandatorio_val = str(row[col_mandatoria]).strip()
+                descricao = (
+                    str(row[col_descricao]).strip()
+                    if col_descricao and pd.notna(row.get(col_descricao))
+                    else ""
+                )
+                existe = atributo.upper() in cols_cmdb_upper
+
+                resultados.append(
+                    {
+                        "Classe (sys_class_name)": classe,
+                        "Campo Mandatório (Variable)": atributo,
+                        "Tipo Mandatoriedade": mandatorio_val,
+                        "Descrição": descricao,
+                        "CHECK": existe,
+                        "Status": (
+                            "✅ Presente no CMDB" if existe else "❌ Ausente no CMDB"
+                        ),
+                        "Observação": (
+                            ""
+                            if existe
+                            else "Campo mandatório não existe como coluna na base CMDB"
+                        ),
+                    }
+                )
+
+            if not resultados:
+                return (
+                    False,
+                    "Nenhum resultado gerado. Verifique os arquivos selecionados.",
+                )
+
+            df_resultado = pd.DataFrame(resultados)
+
+            # Ordenar: ausentes primeiro, depois por classe e campo
+            df_resultado = df_resultado.sort_values(
+                ["CHECK", "Classe (sys_class_name)", "Campo Mandatório (Variable)"]
+            )
+
+            # ── 6. SALVAR EXCEL COM FORMATAÇÃO ──────────────────────────────────────
+            with pd.ExcelWriter(caminho_saida, engine="openpyxl") as writer:
+                df_resultado.to_excel(writer, index=False, sheet_name="Validação CMDB")
+
+                ws = writer.sheets["Validação CMDB"]
+
+                # Ajuste automático de largura das colunas
+                for col_cells in ws.columns:
+                    max_len = max(
+                        (len(str(cell.value)) if cell.value is not None else 0)
+                        for cell in col_cells
+                    )
+                    ws.column_dimensions[col_cells[0].column_letter].width = min(
+                        max_len + 4, 70
+                    )
+
+                # Colorir cabeçalho
+                from openpyxl.styles import PatternFill, Font
+
+                header_fill = PatternFill(
+                    start_color="1F3864", end_color="1F3864", fill_type="solid"
+                )
+                header_font = Font(color="FFFFFF", bold=True)
+                for cell in ws[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+
+                # Colorir linhas com CHECK = FALSE em vermelho claro
+                red_fill = PatternFill(
+                    start_color="FFCCCC", end_color="FFCCCC", fill_type="solid"
+                )
+                green_fill = PatternFill(
+                    start_color="CCFFCC", end_color="CCFFCC", fill_type="solid"
+                )
+                col_check_idx = df_resultado.columns.get_loc("CHECK") + 1  # 1-indexed
+                for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+                    check_cell = row[col_check_idx - 1]
+                    fill = green_fill if check_cell.value else red_fill
+                    for cell in row:
+                        cell.fill = fill
+
+            presentes = int(df_resultado["CHECK"].sum())
+            ausentes = len(df_resultado) - presentes
+
+            return True, (
+                f"✅ Validação concluída com sucesso!\n\n"
+                f"Total de campos mandatórios verificados: {len(df_resultado)}\n"
+                f"✅ Presentes na base CMDB:  {presentes}\n"
+                f"❌ Ausentes no CMDB:        {ausentes}\n\n"
+                f"Relatório salvo em:\n{caminho_saida}"
+            )
+
+        except Exception:
+            return False, f"Erro técnico na validação:\n{traceback.format_exc()}"
+
     def validar_tabela(self, caminho_tabela, nome_aba_master=None, nome_tabela=None):
         """Valida a estrutura da tabela utilizando leituras tolerantes a falhas."""
         try:
             print(f"Validando tabela: {caminho_tabela}")
 
-            # 1. Leitura Robusta da Tabela Alvo (Lê 5 linhas para garantir extração do cabeçalho real)
             if caminho_tabela.lower().endswith(".csv"):
                 df_tabela = self._data_processor._tenta_ler_csv(caminho_tabela, nrows=5)
             else:
@@ -667,7 +901,6 @@ class StructureValidator:
 
             colunas_tabela = set(df_tabela.columns.astype(str).str.strip().str.upper())
 
-            # 2. Resolução do Master
             if self.master_data is None:
                 if not self.master_path:
                     self.master_path = self._encontrar_arquivo_master()
@@ -676,10 +909,8 @@ class StructureValidator:
                             False,
                             "ARQUIVO MASTER INACESSÍVEL: Validação abortada para evitar falso-positivos.",
                         )
-
                 self.carregar_master(self.master_path)
 
-            # 3. Mapeamento
             modelo_correto = self._encontrar_modelo_no_master(
                 nome_aba_master, nome_tabela, colunas_tabela
             )
@@ -690,7 +921,6 @@ class StructureValidator:
                     "Nenhum modelo de dados compatível foi encontrado no arquivo Master.",
                 )
 
-            # 4. Cálculo de Conformidade
             colunas_modelo = set(modelo_correto["colunas"])
             colunas_faltantes = colunas_modelo - colunas_tabela
             colunas_extra = colunas_tabela - colunas_modelo
@@ -766,21 +996,17 @@ class StructureValidator:
                         "similaridade": similaridade,
                     }
 
-        # Aceita o match se bater pelo menos 5% (Evita falhas por espaços ou caracteres especiais)
         if melhor_match and maior_similaridade > 0.05:
             return melhor_match
-
         return None
 
     def _extrair_colunas_master_candidatas(self, df_master):
-        """RAIO-X: Procura o verdadeiro cabeçalho mesmo que ele não esteja na primeira linha"""
+        """RAIO-X: Procura o verdadeiro cabeçalho mesmo que não esteja na primeira linha."""
         candidatas = []
         dfs_para_analisar = [df_master]
 
-        # Tenta achar cabeçalhos deslocados nas primeiras 20 linhas (Muito comum no CMDB)
         for i in range(min(20, len(df_master))):
             linha_str = df_master.iloc[i].astype(str).str.lower()
-            # Se encontrar palavras chaves do CMDB na linha, assume que é o cabeçalho verdadeiro!
             if any(
                 term in val
                 for val in linha_str.values
@@ -799,7 +1025,6 @@ class StructureValidator:
                 dfs_para_analisar.append(df_deslocado)
 
         for df in dfs_para_analisar:
-            # Tenta encontrar colunas verticais de dicionário
             for col in df.columns:
                 col_lower = str(col).lower()
                 if any(
@@ -815,12 +1040,10 @@ class StructureValidator:
                     ]
                 ):
                     serie_limpa = df[col].dropna().astype(str).str.strip().str.upper()
-                    # Filtra células vazias ("") que podem virar colunas fantasmas
                     colunas = set(serie_limpa[serie_limpa != ""])
                     if colunas:
                         candidatas.append(colunas)
 
-            # Sempre avalia o cabeçalho natural da tabela em questão
             colunas_cabecalho = set(df.columns.astype(str).str.strip().str.upper())
             colunas_validas = set(
                 c
@@ -840,21 +1063,17 @@ class StructureValidator:
 
     def definir_master_manual(self, caminho_master):
         self.master_path = caminho_master
-        self.carregar_master(
-            caminho_master, force_reload=True
-        )  # Força recarregamento na próxima validação
+        self.carregar_master(caminho_master, force_reload=True)
 
 
 # Função de conveniência para uso rápido
 def validar_estrutura_tabela(caminho_tabela, caminho_master=None, nome_aba=None):
     """
-    Função rápida para validar uma tabela contra o master
-
+    Função rápida para validar uma tabela contra o master.
     Exemplo:
         sucesso, resultado = validar_estrutura_tabela("dados.csv")
     """
     validador = StructureValidator()
     if caminho_master:
         validador.definir_master_manual(caminho_master)
-
     return validador.validar_tabela(caminho_tabela, nome_aba)

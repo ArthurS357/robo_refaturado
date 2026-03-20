@@ -61,7 +61,7 @@ class TabFerramentas(BaseTab):
         )
         ttk.Label(
             c_unif,
-            text="Selecione a pasta raiz onde estão os arquivos divididos (_pt1, _pt2).",
+            text="Selecione a pasta onde estão os arquivos divididos (_pt1, _pt2...). Será gerado um arquivo UNIFICADO_ para cada grupo encontrado.",
             style="ToolCard.TLabel",
             wraplength=800,
         ).pack(anchor="w")
@@ -96,7 +96,7 @@ class TabFerramentas(BaseTab):
         ).pack(anchor="w", pady=(0, 5))
         ttk.Label(
             c_mast,
-            text="Selecione o mês abaixo. O sistema buscará as pastas automaticamente.",
+            text="Selecione o mês abaixo. O sistema buscará recursivamente todas as pastas com esse mês e consolidará os CSVs em um único arquivo MASTER.",
             style="ToolCard.TLabel",
             wraplength=800,
         ).pack(anchor="w")
@@ -130,8 +130,8 @@ class TabFerramentas(BaseTab):
         ttk.Label(
             c_val,
             text=(
-                "Cruza os campos mandatórios do Master (Mandatory) com a base CMDB "
-                "e gera um relatório Excel indicando CHECK = TRUE (existe) ou FALSE (faltante)."
+                "Cruza os campos mandatórios do Master (Mandatory) com as colunas da base CMDB "
+                "e gera um relatório Excel com CHECK = ✅ Presente / ❌ Ausente por campo e classe."
             ),
             style="ToolCard.TLabel",
             wraplength=800,
@@ -180,7 +180,7 @@ class TabFerramentas(BaseTab):
             command=self._limpar_logs_seguro,
         ).pack(side="left", padx=5)
 
-        # --- 5. Parquet (Conversor interativo com seleção de arquivos) ---
+        # --- 5. Parquet ---
         c_parq = self._criar_card_ferramenta(
             content_frame, "Conversor CSV / Excel → Parquet", "📦"
         )
@@ -226,25 +226,100 @@ class TabFerramentas(BaseTab):
     # 2. LÓGICA DAS FERRAMENTAS
     # ==========================
 
-    # --- Lógica de Unificação ---
+    # ── UNIFICAÇÃO DE PARTES ─────────────────────────────────────────────────────
     def tool_unificar_pasta(self):
-        d = self.path_unificacao_var.get()
-        if d:
-            self.prog_unif.pack(fill="x", pady=5, before=self.btn_unif)
-            self.prog_unif.start(10)
+        """
+        Unifica arquivos _pt1, _pt2... numa pasta selecionada.
+        Valida o caminho antes de iniciar e exibe resultado detalhado ao final.
+        """
+        d = self.path_unificacao_var.get().strip()
 
-            def _thread_unif():
-                try:
-                    self.app.motor.processar_fusao_partes(d)
-                    self.app.after(0, lambda: messagebox.showinfo("Fim", "Concluído."))
-                finally:
+        if not d:
+            return messagebox.showwarning(
+                "Pasta não selecionada",
+                "Clique em 📁 para selecionar a pasta que contém os arquivos a unificar.",
+            )
+        if not os.path.exists(d) or not os.path.isdir(d):
+            return messagebox.showerror(
+                "Caminho inválido",
+                f"A pasta abaixo não existe ou está inacessível:\n\n{d}",
+            )
+
+        self.btn_unif.config(state="disabled")
+        self.prog_unif.pack(fill="x", pady=5, before=self.btn_unif)
+        self.prog_unif.start(10)
+        self.app.log(f"Iniciando unificação em: {d}")
+
+        def _thread_unif():
+            try:
+                resultado = self.app.motor.processar_fusao_partes(d)
+
+                # processar_fusao_partes retorna o dict de unificar_partes
+                if isinstance(resultado, dict):
+                    unificados = resultado.get("unificados", 0)
+                    msg_backend = resultado.get("msg", "Processo finalizado.")
+                    erros = resultado.get("erros", [])
+
+                    if unificados == 0:
+                        # Sem partes encontradas OU sem grupos com 2+ partes
+                        self.app.after(
+                            0,
+                            lambda: messagebox.showinfo(
+                                "Nada a unificar",
+                                f"{msg_backend}\n\n"
+                                "Certifique-se de que os arquivos possuem sufixo _pt1, _pt2... no nome.",
+                            ),
+                        )
+                    else:
+                        detalhe_erros = (
+                            f"\n\n⚠️ Erros encontrados ({len(erros)}):\n"
+                            + "\n".join(erros[:5])
+                            if erros
+                            else ""
+                        )
+                        self.app.after(
+                            0,
+                            lambda: messagebox.showinfo(
+                                "Unificação Concluída ✅",
+                                f"{msg_backend}\n\n"
+                                f"Os arquivos UNIFICADO_*.csv foram salvos em:\n{d}"
+                                f"{detalhe_erros}",
+                            ),
+                        )
+                        self.app.after(0, lambda: os.startfile(d))
+                else:
+                    # Fallback: backend antigo sem dict (segurança)
                     self.app.after(
-                        0, lambda: [self.prog_unif.stop(), self.prog_unif.pack_forget()]
+                        0,
+                        lambda: messagebox.showinfo(
+                            "Concluído", "Unificação finalizada."
+                        ),
                     )
 
-            threading.Thread(target=_thread_unif, daemon=True).start()
+            except Exception as e:
+                import traceback
 
-    # --- Lógica de Master Mensal ---
+                tb = traceback.format_exc()
+                self.app.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Erro na Unificação",
+                        f"Ocorreu um erro inesperado:\n\n{e}\n\n{tb}",
+                    ),
+                )
+            finally:
+                self.app.after(
+                    0,
+                    lambda: [
+                        self.prog_unif.stop(),
+                        self.prog_unif.pack_forget(),
+                        self.btn_unif.config(state="normal"),
+                    ],
+                )
+
+        threading.Thread(target=_thread_unif, daemon=True).start()
+
+    # ── GERADOR DE MASTER MENSAL ─────────────────────────────────────────────────
     def atualizar_lista_meses_rede(self):
         path_base = self.DEFAULT_NETWORK_PATH
         if not os.path.exists(path_base):
@@ -291,62 +366,125 @@ class TabFerramentas(BaseTab):
         threading.Thread(target=_search_thread, daemon=True).start()
 
     def tool_gerar_master(self):
-        m = self.mes_selecionado.get()
-        r = self.app.path_rede.get()
-        if m and r:
-            self.prog_master.pack(fill="x", pady=5, before=self.btn_master)
-            self.prog_master.start(10)
+        """
+        Gera o arquivo Master consolidado para o mês selecionado.
+        Varre recursivamente a pasta de rede buscando todas as subpastas com o mês.
+        """
+        m = self.mes_selecionado.get().strip()
+        r = self.app.path_rede.get().strip()
 
-            def _thread_master():
-                try:
-                    self.app.motor.processar_master(r, m)
-                    self.app.after(0, lambda: messagebox.showinfo("Fim", "Concluído."))
-                finally:
+        if not m:
+            return messagebox.showwarning(
+                "Aviso", "Selecione um mês no combobox antes de continuar."
+            )
+        if not r:
+            return messagebox.showwarning(
+                "Aviso", "Selecione a Pasta de Rede na aba Execução."
+            )
+        if not os.path.exists(r):
+            return messagebox.showerror(
+                "Pasta inacessível",
+                f"A pasta abaixo não foi encontrada ou está offline:\n\n{r}",
+            )
+        if not re.match(r"^\d{2}\.\d{4}$", m):
+            return messagebox.showwarning(
+                "Formato inválido",
+                f"O mês deve estar no formato MM.YYYY (ex: 03.2026).\nValor informado: '{m}'",
+            )
+
+        self.btn_master.config(state="disabled")
+        self.prog_master.pack(fill="x", pady=5, before=self.btn_master)
+        self.prog_master.start(10)
+        self.app.log(f"Gerando MASTER para {m} a partir de: {r}")
+
+        def _thread_master():
+            try:
+                output_path = self.app.motor.processar_master(r, m)
+
+                if output_path and os.path.exists(output_path):
+                    tamanho_mb = os.path.getsize(output_path) / (1024 * 1024)
+                    msg = (
+                        f"✅ MASTER gerado com sucesso!\n\n"
+                        f"Arquivo:  {os.path.basename(output_path)}\n"
+                        f"Tamanho:  {tamanho_mb:.2f} MB\n"
+                        f"Local:    {output_path}"
+                    )
+                    self.app.after(
+                        0, lambda: messagebox.showinfo("Master Concluído", msg)
+                    )
+                    self.app.after(
+                        0, lambda: os.startfile(os.path.dirname(output_path))
+                    )
+                else:
                     self.app.after(
                         0,
-                        lambda: [
-                            self.prog_master.stop(),
-                            self.prog_master.pack_forget(),
-                        ],
+                        lambda: messagebox.showwarning(
+                            "Nenhum dado encontrado",
+                            f"Não foram encontrados arquivos CSV válidos em pastas "
+                            f"nomeadas '{m}' dentro de:\n\n{r}\n\n"
+                            "Verifique se o mês selecionado está correto e se a pasta de rede está acessível.",
+                        ),
                     )
+            except Exception as e:
+                import traceback
 
-            threading.Thread(target=_thread_master, daemon=True).start()
-        else:
-            messagebox.showwarning("Aviso", "Selecione o Mês e a Pasta de Rede.")
+                tb = traceback.format_exc()
+                self.app.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Erro ao Gerar Master", f"Ocorreu um erro:\n\n{e}\n\n{tb}"
+                    ),
+                )
+            finally:
+                self.app.after(
+                    0,
+                    lambda: [
+                        self.prog_master.stop(),
+                        self.prog_master.pack_forget(),
+                        self.btn_master.config(state="normal"),
+                    ],
+                )
 
-        # --- Lógica de Validação CMDB vs Master ---
+        threading.Thread(target=_thread_master, daemon=True).start()
 
+    # ── VALIDAÇÃO CMDB vs MASTER ─────────────────────────────────────────────────
     def tool_validar_cmdb(self):
+        """
+        Valida os campos mandatórios do Master contra as colunas presentes na base CMDB.
+        Usa StructureValidator.executar_validacao_completa (adicionado em audit_data.py).
+        """
         if not HAS_PANDAS:
             return messagebox.showerror(
-                "Erro",
-                "Biblioteca 'pandas' não instalada.\n"
-                "Instale com: pip install pandas openpyxl",
+                "Dependência faltando",
+                "A biblioteca 'pandas' não está instalada.\n"
+                "Execute no terminal:\n\n  pip install pandas openpyxl",
             )
 
         cmdb_path = filedialog.askopenfilename(
-            title="Passo 1/3: Selecione a Base CMDB (CSV/Excel)",
-            filetypes=[("Base de Dados", "*.csv *.xlsx *.xls")],
+            title="Passo 1/3 — Selecione a Base CMDB (CSV ou Excel)",
+            filetypes=[("Base de Dados", "*.csv *.xlsx *.xls"), ("Todos", "*.*")],
         )
         if not cmdb_path:
             return
 
         master_path = filedialog.askopenfilename(
-            title="Passo 2/3: Selecione o Modelo Master (Excel)",
+            title="Passo 2/3 — Selecione o Modelo Master (Excel)",
             filetypes=[("Arquivos Excel", "*.xlsx *.xls")],
         )
         if not master_path:
             return
 
         output_path = filedialog.asksaveasfilename(
-            title="Passo 3/3: Onde salvar o Relatório de Validação?",
+            title="Passo 3/3 — Onde salvar o Relatório de Validação?",
             defaultextension=".xlsx",
             filetypes=[("Excel", "*.xlsx")],
+            initialfile="Validacao_CMDB_vs_Master.xlsx",
         )
         if not output_path:
             return
 
         self.app.log("Iniciando validação CMDB vs Master... Aguarde.")
+        self.btn_val.config(state="disabled")
         self.prog_val.pack(fill="x", pady=5, before=self.btn_val)
         self.prog_val.start(10)
 
@@ -362,29 +500,36 @@ class TabFerramentas(BaseTab):
                 if sucesso:
                     self.app.after(
                         0,
-                        lambda: messagebox.showinfo("Concluído", mensagem),
+                        lambda: messagebox.showinfo("Validação Concluída ✅", mensagem),
                     )
                     self.app.after(0, lambda: os.startfile(output_path))
                 else:
                     self.app.after(
-                        0,
-                        lambda: messagebox.showerror("Falha na Validação", mensagem),
+                        0, lambda: messagebox.showerror("Falha na Validação", mensagem)
                     )
             except Exception as e:
+                import traceback
+
+                tb = traceback.format_exc()
                 self.app.after(
                     0,
                     lambda: messagebox.showerror(
-                        "Erro", f"Ocorreu um erro crítico: {e}"
+                        "Erro Crítico na Validação", f"{e}\n\n{tb}"
                     ),
                 )
             finally:
                 self.app.after(
-                    0, lambda: [self.prog_val.stop(), self.prog_val.pack_forget()]
+                    0,
+                    lambda: [
+                        self.prog_val.stop(),
+                        self.prog_val.pack_forget(),
+                        self.btn_val.config(state="normal"),
+                    ],
                 )
 
         threading.Thread(target=_thread_validar, daemon=True).start()
 
-    # --- Tratamento de dados (Completude)
+    # ── COMPLETUDE CMDB ──────────────────────────────────────────────────────────
     def tool_completude_cmdb(self):
         cmdb_path = filedialog.askopenfilename(
             title="Passo 1/3: Selecione a Base CMDB (CSV)", filetypes=[("CSV", "*.csv")]
@@ -430,7 +575,9 @@ class TabFerramentas(BaseTab):
                         0, lambda: messagebox.showerror("Erro na Análise", mensagem)
                     )
             except Exception as e:
-                self.app.after(0, lambda: messagebox.showerror("Erro Crítico", str(e)))
+                self.app.after(
+                    0, lambda err=e: messagebox.showerror("Erro Crítico", str(err))
+                )
             finally:
                 self.app.after(
                     0, lambda: [self.prog_comp.stop(), self.prog_comp.pack_forget()]
@@ -438,7 +585,7 @@ class TabFerramentas(BaseTab):
 
         threading.Thread(target=_thread_completude, daemon=True).start()
 
-    # --- Lógica de Manutenção ---
+    # ── MANUTENÇÃO ───────────────────────────────────────────────────────────────
     def _limpar_logs_seguro(self):
         if messagebox.askyesno(
             "Limpeza de Logs",
@@ -464,7 +611,7 @@ class TabFerramentas(BaseTab):
 
         threading.Thread(target=_thread_limpeza, daemon=True).start()
 
-    # --- 5. Lógica do Conversor Parquet (CSV / Excel → Parquet) ---
+    # ── CONVERSOR PARQUET ────────────────────────────────────────────────────────
     def tool_converter_parquet(self):
         if not HAS_PANDAS:
             return messagebox.showerror(
@@ -506,8 +653,6 @@ class TabFerramentas(BaseTab):
             daemon=True,
         ).start()
 
-        # --- Lógica do Conversor Parquet (CSV / Excel → Parquet) ---
-
     def _detectar_separador_csv(self, caminho):
         """Detecta separador e encoding do CSV a partir de uma amostra inicial."""
         import csv as csv_mod
@@ -523,14 +668,7 @@ class TabFerramentas(BaseTab):
         return ",", "utf-8-sig"
 
     def _ler_arquivo_para_df(self, caminho):
-        """Lê um CSV ou Excel e retorna um DataFrame padronizado.
-
-        Para CSVs grandes ou mal-formados:
-        - Detecta separador e encoding automaticamente via amostra
-        - Usa o engine C (muito mais rápido que 'python' em arquivos 800k+)
-        - Linhas com número inconsistente de campos são ignoradas
-          em vez de derrubar todo o processo
-        """
+        """Lê um CSV ou Excel e retorna um DataFrame padronizado."""
         ext = os.path.splitext(caminho)[1].lower()
 
         if ext == ".csv":
@@ -543,16 +681,11 @@ class TabFerramentas(BaseTab):
                 low_memory=False,
             )
 
-            # pandas >= 1.3 introduziu on_bad_lines; versões anteriores
-            # usam o par error_bad_lines / warn_bad_lines (deprecated).
             try:
                 df = pd.read_csv(on_bad_lines="warn", **read_kwargs)
             except TypeError:
-                # Fallback para pandas < 1.3
                 df = pd.read_csv(
-                    error_bad_lines=False,
-                    warn_bad_lines=True,
-                    **read_kwargs,
+                    error_bad_lines=False, warn_bad_lines=True, **read_kwargs
                 )
 
         elif ext in (".xlsx", ".xls"):
@@ -621,13 +754,15 @@ class TabFerramentas(BaseTab):
                     ),
                 )
         except Exception as e:
-            self.app.after(0, lambda: messagebox.showerror("Erro Fatal", str(e)))
+            self.app.after(
+                0, lambda err=e: messagebox.showerror("Erro Fatal", str(err))
+            )
         finally:
             self.app.after(
                 0, lambda: [self.prog_parquet.stop(), self.prog_parquet.pack_forget()]
             )
 
-    # --- Lógica de Análise de Existência ---
+    # ── ANÁLISE DE EXISTÊNCIA ────────────────────────────────────────────────────
     def analisar_problemas_existencia(self):
         self.prog_analise.pack(fill="x", pady=5, before=self.btn_analise)
         self.prog_analise.start(10)
@@ -701,7 +836,10 @@ class TabFerramentas(BaseTab):
                     )
             except Exception as e:
                 self.app.after(
-                    0, lambda: messagebox.showerror("Erro", f"Erro na análise: {e}")
+                    0,
+                    lambda err=e: messagebox.showerror(
+                        "Erro", f"Erro na análise: {err}"
+                    ),
                 )
             finally:
                 self.app.after(
