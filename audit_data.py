@@ -434,247 +434,297 @@ class DataProcessor:
             msg += f" | {len(erros)} erro(s)."
         return {"sucesso": True, "msg": msg, "unificados": unificados, "erros": erros}
 
-    # ---------- relatorio de completude (Alex_visao_base_CMDB_V4.PY) ---------
-
-    def gerar_relatorio_completude(
-        self, caminho_cmdb: str, caminho_master: str, caminho_saida: str
-    ):
-        """
-        Cruza a base CMDB com os campos mandatorios do Master.
-        Exporta Excel com 3 abas:
-          1. visao_datamaster_brasil  — TODOS os campos mandatórios do Master,
-                                       incluindo os sem correspondência no CMDB
-                                       (nulos/ausentes aparecem com células vazias)
-          2. completude_brasil        — resumo de cobertura por classe
-          3. atributo_sem_mandatorio  — classes no CMDB sem referencia no Master
-
-        Logica fiel ao Alex_visao_base_CMDB_V4.PY.
-        Leitura correta do Master: aba 'Attributes', iloc[:,4:26], Mandatory=='Mandatory'.
-
-        ALTERAÇÃO: df_master_filtrado agora inclui registros left_only (campos
-        mandatórios do Master que NÃO encontraram correspondência no CMDB),
-        exibindo-os com nulos/percentual_nulos em branco para identificação.
-        """
+    # --- LÓGICA DO RELATÓRIO DE COMPLETUDE (ATUALIZADA) ---
+    def gerar_relatorio_completude(self, caminho_cmdb, caminho_master, caminho_saida):
+        """Lógica avançada para cruzar a Base CMDB com as regras de completude do Master."""
         try:
-            # 1. Master
-            print("\n-- Carregando Master --")
+            # 1. CARREGAMENTO E MAPEAMENTO DO MASTER
             try:
-                data_master = _carregar_master_attributes(caminho_master)
+                # Busca dinâmica da aba para evitar erro de case-sensitive ou espaços
+                xl = pd.ExcelFile(caminho_master)
+                aba_alvo = next(
+                    (
+                        s
+                        for s in xl.sheet_names
+                        if s.strip().lower() in ["attributes", "atributos"]
+                    ),
+                    None,
+                )
+
+                if not aba_alvo:
+                    return (
+                        False,
+                        f"Aba 'Attributes' não encontrada no Master. Abas disponíveis: {xl.sheet_names}",
+                    )
+
+                df_master_raw = pd.read_excel(
+                    caminho_master, sheet_name=aba_alvo, header=None
+                )
+                header_idx = -1
+                for idx, row in df_master_raw.head(30).iterrows():
+                    row_str = row.astype(str).str.lower().tolist()
+                    if "variable" in row_str and (
+                        "class" in row_str or "sys class name" in row_str
+                    ):
+                        header_idx = idx
+                        break
+
+                df_master = pd.read_excel(
+                    caminho_master,
+                    sheet_name=aba_alvo,
+                    skiprows=header_idx if header_idx != -1 else 0,
+                )
             except Exception as e:
-                return False, f"Erro ao ler arquivo Master:\n{e}"
-            print(f"   Campos mandatorios: {len(data_master)}")
-            print(f"   Classes unicas:     {data_master['Class'].nunique()}")
+                return False, f"Erro ao ler arquivo Master: {str(e)}"
 
-            # 2. CMDB
-            print("\n-- Carregando CMDB --")
-            try:
-                dados = _read_csv_robust(Path(caminho_cmdb))
-            except Exception as e:
-                return False, f"Erro ao ler base CMDB:\n{e}"
+            df_master.columns = df_master.columns.astype(str).str.strip().str.lower()
 
-            if "sys_class_name" not in dados.columns:
-                return False, (
-                    "Coluna 'sys_class_name' nao encontrada na base CMDB.\n"
-                    f"Colunas disponiveis: {list(dados.columns[:15])}"
+            # CLONAGEM DE MÚLTIPLAS COLUNAS NO MASTER
+            mapa_clonagem = {
+                "company": ["company", "u_company"],
+                "business_criticality": [
+                    "business_criticality",
+                    "u_business_criticality",
+                ],
+                "sys_class_name": ["sys_class_name", "class", "sys class name"],
+                "u_type_ref": ["u_type_ref", "type_ref"],
+            }
+
+            for destino, origens in mapa_clonagem.items():
+                col_nome_filtro = f"{destino}.filtro"
+                col_origem_master = next(
+                    (c for c in df_master.columns if c in origens), None
                 )
-            print(f"   Linhas CMDB:           {len(dados):,}")
-            print(f"   Classes unicas (CMDB): {dados['sys_class_name'].nunique()}")
+                if col_origem_master:
+                    df_master[col_nome_filtro] = df_master[col_origem_master].copy()
 
-            # 3. Contagem nulos — classes != 'Computer'
-            print("\n-- Processando classes nao-Computer --")
-            colunas_para_contar = dados.columns.drop("sys_class_name", errors="ignore")
-            resultado_nao_computer = _contar_nulos_por_id(
-                dados, "sys_class_name", colunas_para_contar
+            col_mandatoria = next(
+                (c for c in df_master.columns if "mandatory" in c), None
             )
-            resultado_nao_computer = resultado_nao_computer[
-                resultado_nao_computer["sys_class_name"] != "Computer"
-            ]
-            print(f"   Combinacoes geradas: {len(resultado_nao_computer):,}")
-
-            # 4. Contagem nulos — class 'Computer' via u_category
-            print("\n-- Processando classe Computer --")
-            df_resultado_computer = pd.DataFrame()
-            tem_computer = (dados["sys_class_name"] == "Computer").any()
-            tem_u_category = "u_category" in dados.columns
-
-            if tem_computer and tem_u_category:
-                colunas_computer = dados.columns.drop("u_category", errors="ignore")
-                df_resultado_computer = _contar_computer(
-                    dados, "u_category", colunas_computer, col_ref="sys_class_name"
-                )
-                df_resultado_computer = df_resultado_computer.rename(
-                    columns={"u_category": "sys_class_name"}
-                )
-                mapa_computer = {
-                    "ATM": "Computer (ATM / Finance Device)",
-                    "Financial Device": "Computer (ATM / Finance Device)",
-                    "Personal Computer": "Computer (Personal Computer / Virtual Desktop)",
-                }
-                for val_csv, val_master in mapa_computer.items():
-                    df_resultado_computer.loc[
-                        df_resultado_computer["sys_class_name"] == val_csv,
-                        "sys_class_name",
-                    ] = val_master
-                print(f"   Combinacoes geradas: {len(df_resultado_computer):,}")
-            else:
-                motivo = []
-                if not tem_computer:
-                    motivo.append("classe 'Computer' nao encontrada no CMDB")
-                if not tem_u_category:
-                    motivo.append("coluna 'u_category' ausente")
-                print(f"   Ignorado ({'; '.join(motivo)}).")
-
-            # 5. Unifica
-            partes = [resultado_nao_computer]
-            if not df_resultado_computer.empty:
-                partes.append(df_resultado_computer)
-            resultados_mesclados = pd.concat(partes, ignore_index=True, axis=0)
-
-            # 6. Normaliza para UPPER
-            resultados_mesclados[["sys_class_name", "coluna"]] = resultados_mesclados[
-                ["sys_class_name", "coluna"]
-            ].apply(lambda x: x.astype(str).str.upper())
-            data_master = data_master.copy()
-            data_master[["Class", "Variable"]] = data_master[
-                ["Class", "Variable"]
-            ].apply(lambda x: x.astype(str).str.upper())
-
-            # 7. Percentual de nulos
-            resultados_mesclados["percentual_nulos"] = (
-                resultados_mesclados["nulos"] / resultados_mesclados["total"] * 100
-            ).round(2)
-
-            print(
-                f"\n   Total combinacoes classe*campo CMDB: {len(resultados_mesclados):,}"
+            col_atributo_master = (
+                "variable" if "variable" in df_master.columns else None
             )
-
-            # 8. Merge Master (left) <- CMDB
-            print("\n-- Cruzando Master com CMDB --")
-            df_master_merged = data_master.merge(
-                resultados_mesclados,
-                left_on=["Class", "Variable"],
-                right_on=["sys_class_name", "coluna"],
-                how="left",
-                indicator=True,
-            )
-
-            # ─────────────────────────────────────────────────────────────────
-            # ALTERAÇÃO: inclui TODOS os registros do Master no relatório,
-            # inclusive os "left_only" (campos mandatórios sem dados no CMDB).
-            # Antes: filtrava fora os left_only — agora eles aparecem com
-            # nulos/total/percentual_nulos em branco, permitindo identificar
-            # campos obrigatórios completamente ausentes na base CMDB.
-            # ─────────────────────────────────────────────────────────────────
-            df_master_filtrado = df_master_merged.copy()
-
-            colunas_saida = [
+            candidatos_classe = [
                 c
-                for c in [
-                    "Class",
-                    "Sys Class Name",
-                    "Level",
-                    "Path",
-                    "Variable",
-                    "Type",
-                    "Reference",
-                    "Max length",
-                    "Default value",
-                    "Definition",
-                    "Section",
-                    "Mandatory",
-                    "Discovery",
-                    "Automation",
-                    "Integration",
-                    "Order",
-                    "Module",
-                    "sys_class_name",
-                    "coluna",
-                    "nulos",
-                    "total",
-                    "percentual_nulos",
-                    "_merge",
-                ]
-                if c in df_master_filtrado.columns
+                for c in df_master.columns
+                if c in ["class", "sys class name", "sys_class_name"]
             ]
-            df_master_filtrado = df_master_filtrado[colunas_saida]
-            print(f"   Registros na visao (com nulos): {len(df_master_filtrado):,}")
 
-            # 9. Analise de completude por classe
-            analise_completude_global = (
-                df_master_merged.groupby(["Class", "_merge"])
-                .size()
-                .unstack(fill_value=0)
-                .reset_index()
-            ).sort_values(by="left_only", ascending=False)
-            analise_completude_global["Total"] = (
-                analise_completude_global.select_dtypes(include="number").sum(axis=1)
-            )
-            if "both" in analise_completude_global.columns:
-                analise_completude_global["percentual"] = (
-                    analise_completude_global["both"]
-                    / analise_completude_global["Total"]
-                    * 100
-                ).round(2)
-                analise_completude_brasil = analise_completude_global[
-                    analise_completude_global["both"] != 0
-                ].copy()
-            else:
-                analise_completude_brasil = analise_completude_global.copy()
+            if not col_mandatoria or not col_atributo_master or not candidatos_classe:
+                return False, f"Erro: Colunas cruciais não encontradas no Master."
 
-            # 10. Classes no CMDB sem referencia no Master
-            df_master_comp = pd.DataFrame(
-                data_master["Class"].dropna().unique(), columns=[0]
+            master_filtrado = df_master[
+                df_master[col_mandatoria]
+                .astype(str)
+                .str.contains("Mandatory", case=False, na=False)
+            ].copy()
+            vars_mandatorias = set(
+                master_filtrado[col_atributo_master].astype(str).str.strip().unique()
             )
-            df_dados_comp = pd.DataFrame(
-                resultados_mesclados["sys_class_name"].dropna().unique(), columns=[0]
-            )
-            df_sem_mandatorio = df_master_comp.merge(
-                df_dados_comp, on=0, how="outer", indicator=True
-            )
-            df_sem_mandatorio = df_sem_mandatorio[
-                df_sem_mandatorio["_merge"] == "right_only"
-            ].rename(columns={0: "sys_class_name_somente_cmdb"})
 
-            # 11. Exporta Excel 3 abas
-            print(f"\n-- Exportando Excel: {caminho_saida} --")
-            with pd.ExcelWriter(caminho_saida, engine="openpyxl") as writer:
-                df_master_filtrado.to_excel(
-                    writer, sheet_name="visao_datamaster_brasil", index=False
+            # 2. ANÁLISE DO CSV
+            df_header = self._tenta_ler_csv(caminho_cmdb, nrows=0)
+            cols_csv_orig = [c.strip() for c in df_header.columns.astype(str)]
+
+            mapa_colunas_csv = {}
+            col_classe_real = next(
+                (c for c in cols_csv_orig if c.lower() in ["sys_class_name", "class"]),
+                None,
+            )
+            if not col_classe_real:
+                return False, "A coluna 'sys_class_name' não foi encontrada no CSV."
+            mapa_colunas_csv["sys_class_name"] = col_classe_real
+
+            col_company_real = next(
+                (
+                    c
+                    for c in cols_csv_orig
+                    if c.lower() in ["company", "u_company", "company_name"]
+                ),
+                None,
+            )
+            if col_company_real:
+                mapa_colunas_csv["company"] = col_company_real
+
+            col_bus_crit_real = next(
+                (
+                    c
+                    for c in cols_csv_orig
+                    if c.lower() in ["business_criticality", "u_business_criticality"]
+                ),
+                None,
+            )
+            if col_bus_crit_real:
+                mapa_colunas_csv["business_criticality"] = col_bus_crit_real
+
+            col_type_ref_real = next(
+                (c for c in cols_csv_orig if c.lower() in ["u_type_ref", "type_ref"]),
+                None,
+            )
+            if col_type_ref_real:
+                mapa_colunas_csv["u_type_ref"] = col_type_ref_real
+
+            # 3. DETECÇÃO DE MATCH
+            df_amostra = self._tenta_ler_csv(caminho_cmdb, nrows=5000)
+            classes_csv = set(
+                df_amostra[col_classe_real]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .unique()
+            )
+
+            melhor_coluna_master = None
+            maior_match = 0
+            for col_cand in candidatos_classe:
+                classes_master = set(
+                    master_filtrado[col_cand]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                    .unique()
                 )
-                analise_completude_brasil.to_excel(
-                    writer, sheet_name="completude_brasil", index=False
-                )
-                df_sem_mandatorio.to_excel(
-                    writer, sheet_name="atributo_sem_mandatorio", index=False
-                )
+                match_count = len(classes_csv.intersection(classes_master))
+                if match_count > maior_match:
+                    maior_match = match_count
+                    melhor_coluna_master = col_cand
 
-            # Métricas do resumo — conta apenas os que têm dados no CMDB
-            df_com_dados = df_master_filtrado[
-                df_master_filtrado["_merge"] != "left_only"
+            if not melhor_coluna_master:
+                melhor_coluna_master = candidatos_classe[0]
+
+            # 4. CARREGAMENTO E CLONAGEM NO CSV
+            cols_base_csv = list(mapa_colunas_csv.values())
+            cols_para_carregar = [
+                c for c in cols_csv_orig if c in cols_base_csv or c in vars_mandatorias
             ]
-            media_nulos = (
-                df_com_dados["percentual_nulos"].mean()
-                if "percentual_nulos" in df_com_dados.columns
-                else 0
+
+            df_fonte = pd.read_csv(
+                caminho_cmdb,
+                sep=None,
+                engine="python",
+                encoding="utf-8-sig",
+                usecols=cols_para_carregar,
+                dtype=str,
+                on_bad_lines="skip",
             )
-            classes_brasil = (
-                analise_completude_brasil["Class"].nunique()
-                if "Class" in analise_completude_brasil.columns
-                else 0
+            df_fonte.columns = df_fonte.columns.astype(str).str.strip()
+
+            colunas_agrupamento_finais = []
+            chaves_ordem = [
+                "sys_class_name",
+                "company",
+                "business_criticality",
+                "u_type_ref",
+            ]
+
+            for chave in chaves_ordem:
+                nome_col_filtro = f"{chave}.filtro"
+                if chave in mapa_colunas_csv:
+                    nome_col_real = mapa_colunas_csv[chave]
+                    if nome_col_real in df_fonte.columns:
+                        df_fonte[nome_col_filtro] = df_fonte[nome_col_real].copy()
+                        colunas_agrupamento_finais.append(nome_col_filtro)
+
+            valores_nulos = [
+                "",
+                "No Data",
+                "Without Data",
+                "N/A",
+                "null",
+                "nan",
+                "None",
+            ]
+            df_fonte.replace(valores_nulos, np.nan, inplace=True)
+            gc.collect()
+
+            grouped = df_fonte.groupby(colunas_agrupamento_finais, dropna=False)
+            df_totais = grouped.size().reset_index(name="Total")
+            df_preenchidos = grouped.count().reset_index()
+
+            del df_fonte
+            gc.collect()
+
+            df_melted = df_preenchidos.melt(
+                id_vars=colunas_agrupamento_finais,
+                var_name="Atributo",
+                value_name="Preenchidos",
             )
-            sem_dados_cmdb = int((df_master_filtrado["_merge"] == "left_only").sum())
-            return True, (
-                f"Relatorio gerado com sucesso!\n\n"
-                f"Total de campos mandatórios:      {len(df_master_filtrado):,}\n"
-                f"  ✅ Com dados no CMDB:           {len(df_com_dados):,}\n"
-                f"  ❌ Ausentes no CMDB (nulos):    {sem_dados_cmdb:,}\n"
-                f"Classes com mandatorios:           {classes_brasil}\n"
-                f"Media de % nulos (campos c/ dados): {media_nulos:.1f}%\n\n"
-                f"Arquivo salvo em:\n{caminho_saida}"
+            df_calculo = pd.merge(
+                df_melted, df_totais, on=colunas_agrupamento_finais, how="left"
             )
 
-        except Exception:
-            return False, f"Erro tecnico:\n{traceback.format_exc()}"
+            # 5. O JOIN FINAL
+            cols_master_select = [melhor_coluna_master, col_atributo_master]
+            master_join = master_filtrado[cols_master_select].rename(
+                columns={
+                    melhor_coluna_master: "Classe_Alvo",
+                    col_atributo_master: "Atributo_Alvo",
+                }
+            )
+
+            master_join["Classe_Alvo"] = (
+                master_join["Classe_Alvo"].astype(str).str.strip().str.upper()
+            )
+            master_join["Atributo_Alvo"] = (
+                master_join["Atributo_Alvo"].astype(str).str.strip().str.upper()
+            )
+
+            col_join_classe = (
+                "sys_class_name.filtro"
+                if "sys_class_name.filtro" in df_calculo.columns
+                else colunas_agrupamento_finais[0]
+            )
+            df_calculo["Classe_Join"] = (
+                df_calculo[col_join_classe].astype(str).str.strip().str.upper()
+            )
+            df_calculo["Atributo_Join"] = (
+                df_calculo["Atributo"].astype(str).str.strip().str.upper()
+            )
+
+            df_final = pd.merge(
+                df_calculo,
+                master_join,
+                left_on=["Classe_Join", "Atributo_Join"],
+                right_on=["Classe_Alvo", "Atributo_Alvo"],
+                how="inner",
+            )
+
+            if df_final.empty:
+                return (
+                    False,
+                    f"Relatório 0 linhas. Verifique compatibilidade de Classes.",
+                )
+
+            df_final["Total"] = df_final["Total"].fillna(0).astype(int)
+            df_final["Preenchidos"] = df_final["Preenchidos"].fillna(0).astype(int)
+
+            # Ajuste de Nulos explicitamente na tabela de saída
+            df_final["Nulos"] = df_final["Total"] - df_final["Preenchidos"]
+
+            df_final["Percentual_Preenchido"] = np.where(
+                df_final["Total"] > 0, df_final["Preenchidos"] / df_final["Total"], 0
+            ).round(4)
+
+            df_final["Percentual_Nulos"] = np.where(
+                df_final["Total"] > 0, df_final["Nulos"] / df_final["Total"], 0
+            ).round(4)
+
+            df_final["ColunaExiste"] = True
+
+            colunas_remover = [
+                "Classe_Join",
+                "Atributo_Join",
+                "Classe_Alvo",
+                "Atributo_Alvo",
+            ]
+            cols_saida = [c for c in df_final.columns if c not in colunas_remover]
+            df_final[cols_saida].to_excel(caminho_saida, index=False)
+
+            return True, f"Sucesso! Relatório gerado em: {caminho_saida}"
+        except Exception as e:
+            return False, f"Erro Técnico:\n{traceback.format_exc()}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -684,7 +734,7 @@ class DataProcessor:
 
 class StructureValidator:
     """
-    Valida se os campos mandatorios do Master estao presentes como
+    Valida se os campos do Master estao presentes como
     colunas na base CMDB. Gera relatorio Excel com CHECK por campo/classe.
     """
 
@@ -717,19 +767,28 @@ class StructureValidator:
         self, caminho_cmdb: str, caminho_master: str, caminho_saida: str
     ):
         """
-        Valida campos mandatorios do Master vs colunas da base CMDB.
+        Valida campos do Master vs colunas da base CMDB.
         Gera Excel com CHECK Presente/Ausente por campo e classe.
-
-        Leitura correta do Master:
-          - Aba 'Attributes', colunas 4:26 (sem skiprows)
-          - Filtro Mandatory == 'Mandatory'
-          - Chaves: 'Class' (= sys_class_name) e 'Variable' (= coluna CMDB)
         """
         try:
             # 1. Master
             print("\n-- Carregando Master (executar_validacao_completa) --")
             try:
-                df_mandatorios = _carregar_master_attributes(caminho_master)
+                # Carregamos diretamente para aplicar a regra de filtro (Mandatory, Optional, No)
+                df_master_raw = pd.read_excel(
+                    caminho_master, sheet_name="Attributes", engine="openpyxl"
+                )
+                df_mandatorios = df_master_raw.iloc[:, 4:26]
+
+                # Filtra a coluna Mandatory para trazer as 3 opções
+                valores_permitidos = ["MANDATORY", "OPTIONAL", "NO"]
+                df_mandatorios = df_mandatorios[
+                    df_mandatorios["Mandatory"]
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                    .isin(valores_permitidos)
+                ].copy()
             except Exception as e:
                 return False, (
                     f"Erro ao ler o arquivo Master:\n{e}\n\n"
@@ -738,27 +797,61 @@ class StructureValidator:
 
             if df_mandatorios.empty:
                 return False, (
-                    "Nenhum campo 'Mandatory' encontrado no Master.\n"
+                    "Nenhum campo com status válido (Mandatory, Optional, No) encontrado no Master.\n"
                     "Verifique a coluna 'Mandatory'."
                 )
-            print(f"   Campos mandatorios: {len(df_mandatorios)}")
+            print(f"   Campos totais validados: {len(df_mandatorios)}")
             print(f"   Classes:            {df_mandatorios['Class'].nunique()}")
 
-            # 2. Cabecalho do CMDB (eficiente em RAM)
-            print("\n-- Lendo cabecalho do CMDB --")
+            # 2. CMDB (Verificação Real de Dados e Ativos)
+            print("\n-- Lendo e validando base do CMDB --")
             try:
-                df_header = self._data_processor._tenta_ler_csv(caminho_cmdb, nrows=0)
+                # O leitor robusto trará a base para podermos checar se há DADOS reais
+                df_cmdb = self._data_processor._tenta_ler_csv(caminho_cmdb)
+                cols_cmdb_orig = list(df_cmdb.columns)
+                cols_cmdb_upper = set(str(c).strip().upper() for c in cols_cmdb_orig)
+
+                col_classe_csv = next(
+                    (
+                        c
+                        for c in cols_cmdb_orig
+                        if str(c).strip().lower() in ["sys_class_name", "class"]
+                    ),
+                    None,
+                )
+
+                arquivo_vazio = df_cmdb.empty
+                classes_com_ativos = set()
+
+                if col_classe_csv and not arquivo_vazio:
+                    # Mapeia quais classes realmente possuem registros dentro do arquivo
+                    classes_com_ativos = set(
+                        df_cmdb[col_classe_csv]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .str.upper()
+                    )
+
+                print(f"   Colunas no CMDB: {len(cols_cmdb_upper)}")
+                print(f"   Total de ativos encontrados: {len(df_cmdb)}")
+
+                # Libera a memória do dataframe do CMDB, pois já temos os cabeçalhos e as classes ativas
+                del df_cmdb
+                import gc
+
+                gc.collect()
+
             except Exception as e:
                 return False, f"Nao foi possivel ler o arquivo CMDB:\n{e}"
 
-            cols_cmdb_upper = set(df_header.columns.astype(str).str.strip().str.upper())
-            print(f"   Colunas no CMDB: {len(cols_cmdb_upper)}")
-
             # 3. Cruzamento campo a campo
-            print("\n-- Cruzando campos mandatorios vs colunas CMDB --")
+            print("\n-- Cruzando campos do Master vs colunas CMDB --")
             resultados = []
             campos_vistos = set()
 
+            col_module = "Module"
+            col_attribute = "Attribute"
             col_classe = "Class"
             col_atributo = "Variable"
             col_descricao = (
@@ -767,38 +860,70 @@ class StructureValidator:
             col_mandatory = "Mandatory"
 
             for _, row in df_mandatorios.iterrows():
-                atributo = str(row[col_atributo]).strip()
+                atributo = str(row.get(col_atributo, "")).strip()
                 if not atributo or atributo.upper() in ("NAN", "NONE", ""):
                     continue
-                chave = (str(row[col_classe]).strip().upper(), atributo.upper())
+
+                classe = str(row.get(col_classe, "")).strip()
+                if not classe or pd.isna(row.get(col_classe)):
+                    classe = "N/A"
+
+                chave = (classe.upper(), atributo.upper())
                 if chave in campos_vistos:
                     continue
                 campos_vistos.add(chave)
 
-                classe = (
-                    str(row[col_classe]).strip()
-                    if pd.notna(row.get(col_classe))
-                    else "N/A"
-                )
+                # Resgatando Module e Attribute
+                modulo = str(row.get(col_module, "")).strip()
+                if modulo.upper() in ("NAN", "NONE"):
+                    modulo = ""
+
+                atributo_desc = str(row.get(col_attribute, "")).strip()
+                if atributo_desc.upper() in ("NAN", "NONE"):
+                    atributo_desc = ""
+
                 descricao = (
-                    str(row[col_descricao]).strip()
+                    str(row.get(col_descricao, "")).strip()
                     if col_descricao and pd.notna(row.get(col_descricao))
                     else ""
                 )
-                existe = atributo.upper() in cols_cmdb_upper
+
+                # --- LÓGICA CORRIGIDA DOS VERDADEIROS / FALSOS ---
+                existe_coluna = atributo.upper() in cols_cmdb_upper
+
+                if arquivo_vazio:
+                    existe = False
+                    status_str = "Ausente (Base Vazia)"
+                    observacao = "O arquivo não possui base de ativos (0 linhas)."
+                elif (
+                    col_classe_csv
+                    and classe.upper() not in classes_com_ativos
+                    and classe.upper() != "N/A"
+                ):
+                    existe = False
+                    status_str = "Ausente (Classe sem Ativos)"
+                    observacao = f"A classe '{classe}' não possui ativos nesta base."
+                elif not existe_coluna:
+                    existe = False
+                    status_str = "Ausente no CMDB"
+                    observacao = "Campo validado não existe como coluna na base CMDB."
+                else:
+                    existe = True
+                    status_str = "Presente no CMDB"
+                    observacao = "OK"
+
+                # Inserindo na ordem solicitada
                 resultados.append(
                     {
+                        "Module": modulo,
+                        "Attribute": atributo_desc,
                         "Classe (sys_class_name)": classe,
-                        "Campo Mandatorio (Variable)": atributo,
-                        "Tipo Mandatoriedade": str(row[col_mandatory]).strip(),
+                        "Campo (Variable)": atributo,
+                        "Mandatory": str(row.get(col_mandatory, "")).strip(),
                         "Definicao": descricao,
                         "CHECK": existe,
-                        "Status": "Presente no CMDB" if existe else "Ausente no CMDB",
-                        "Observacao": (
-                            ""
-                            if existe
-                            else "Campo mandatorio nao existe como coluna na base CMDB"
-                        ),
+                        "Status": status_str,
+                        "Observacao": observacao,
                     }
                 )
 
@@ -806,9 +931,12 @@ class StructureValidator:
                 return False, "Nenhum resultado gerado. Verifique os arquivos."
 
             df_resultado = pd.DataFrame(resultados)
+
+            # Ordenação do DataFrame final (agrupa por check, módulo, classe e campo)
             df_resultado = df_resultado.sort_values(
-                ["CHECK", "Classe (sys_class_name)", "Campo Mandatorio (Variable)"]
+                ["CHECK", "Module", "Classe (sys_class_name)", "Campo (Variable)"]
             )
+
             presentes = int(df_resultado["CHECK"].sum())
             ausentes = len(df_resultado) - presentes
             print(f"   Presentes: {presentes}  |  Ausentes: {ausentes}")
@@ -852,7 +980,7 @@ class StructureValidator:
 
             return True, (
                 f"Validacao concluida com sucesso!\n\n"
-                f"Total de campos mandatorios verificados: {len(df_resultado)}\n"
+                f"Total de campos verificados: {len(df_resultado)}\n"
                 f"Presentes na base CMDB:  {presentes}\n"
                 f"Ausentes no CMDB:        {ausentes}\n\n"
                 f"Relatorio salvo em:\n{caminho_saida}"
